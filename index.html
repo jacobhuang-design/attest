@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Endorse on Base</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--mute:#6b7280;--line:#e5e7eb;--acc:#1f3fd1;--ok:#0f7a3d;--bad:#b42318}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  main{max-width:560px;margin:0 auto;padding:20px 16px 48px}
+  h1{font-size:22px;margin:4px 0 2px}
+  .sub{color:var(--mute);font-size:14px;margin:0 0 16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0}
+  .label{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--mute);margin:10px 0 2px}
+  .label:first-child{margin-top:0}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
+  .summary{font-size:16px;white-space:pre-wrap}
+  .pill{display:inline-block;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
+  .pill.ok{background:#e7f6ec;color:var(--ok)} .pill.bad{background:#fdecea;color:var(--bad)} .pill.wait{background:#eef1f6;color:var(--mute)}
+  textarea:disabled{background:#f3f4f6;color:var(--mute)}
+  textarea{width:100%;min-height:72px;border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit;resize:vertical}
+  button{width:100%;border:0;border-radius:12px;padding:14px;font:600 17px/1 inherit;background:var(--acc);color:#fff;margin-top:12px;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  #log{font-size:14px;color:var(--mute);margin-top:10px;white-space:pre-wrap}
+  #log.err{color:var(--bad)}
+  a{color:var(--acc)}
+  .warn{background:#fff7e6;border:1px solid #f5d48a;border-radius:12px;padding:12px;font-size:14px;display:none}
+  .note{font-size:13px;color:var(--mute)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Endorse this record</h1>
+  <p class="sub">认证这条记录 · Base Sepolia testnet</p>
+
+  <div id="wechat" class="warn">This page doesn't work inside WeChat. Tap ··· and choose <b>Open in Browser</b> (Safari / Chrome).<br>请点右上角 ··· 选择「在浏览器打开」。</div>
+
+  <div class="card">
+    <div class="label">Author statement · 作者声明</div>
+    <div id="summary" class="summary">Loading…</div>
+    <div class="label">Author · 作者</div>
+    <div id="author" class="mono">—</div>
+    <div class="label">Content hash · 内容哈希</div>
+    <div id="hash" class="mono">—</div>
+    <div class="label">Integrity check · 内容核对</div>
+    <div><span id="check" class="pill wait">checking…</span></div>
+    <div class="label">Record · 链上记录</div>
+    <div class="mono"><a id="refLink" target="_blank" rel="noopener">view on easscan</a></div>
+  </div>
+
+  <div class="card">
+    <div class="label">Your comment · 您的评语</div>
+    <textarea id="comment" maxlength="280">Reviewed. / 已阅。</textarea>
+    <button id="go" disabled>Loading… 加载中…</button>
+    <div id="log"></div>
+    <p class="note">Two taps: first creates a passkey wallet on this phone (no app, no email, no seed phrase), second signs with Face ID. The network fee is sponsored. The endorsement is public and permanent.<br>点两次：第一次在本机生成 passkey 钱包（无需 App、邮箱、助记词），第二次刷脸签名。手续费由发起人代付；认证公开且不可删除。</p>
+  </div>
+</main>
+
+<script type="module">
+import { createPublicClient, http, encodeFunctionData, encodeAbiParameters, decodeAbiParameters, decodeEventLog, sha256, toBytes } from "https://esm.sh/viem@2.57.4";
+import { baseSepolia } from "https://esm.sh/viem@2.57.4/chains";
+import { createWebAuthnCredential, toWebAuthnAccount, toCoinbaseSmartAccount, createBundlerClient } from "https://esm.sh/viem@2.57.4/account-abstraction";
+
+/* ===== CONFIG — edit these ===== */
+const PAYMASTER_URL = "https://api.developer.coinbase.com/rpc/v1/base-sepolia/4leYv8omXJ6IyNGt14AQ83mt6PAsJetO";   // CDP Base Sepolia "Paymaster & Bundler endpoint" (testnet only)
+const DEFAULT_REF = "0x32d1cd888e43611e68182aaddfefdaa4dee68cfdc0f482c9737aa998a33352e4"; // author statement UID
+/* =============================== */
+
+const EAS = "0x4200000000000000000000000000000000000021";
+const ENDORSE_SCHEMA = "0x0926ea59b7a46410b2dbf9451c02377ff86227c3736b9bdb7b5ef6ca80f32dd4"; // bool endorsed,string comment
+const EASSCAN = "https://base-sepolia.easscan.org/attestation/view/";
+const CRED_KEY = "endorse-passkey-v1";
+
+const EAS_ABI = [
+  {type:"function",name:"attest",stateMutability:"payable",inputs:[{name:"request",type:"tuple",components:[
+    {name:"schema",type:"bytes32"},
+    {name:"data",type:"tuple",components:[
+      {name:"recipient",type:"address"},{name:"expirationTime",type:"uint64"},{name:"revocable",type:"bool"},
+      {name:"refUID",type:"bytes32"},{name:"data",type:"bytes"},{name:"value",type:"uint256"}]}]}],
+    outputs:[{type:"bytes32"}]},
+  {type:"function",name:"getAttestation",stateMutability:"view",inputs:[{name:"uid",type:"bytes32"}],
+    outputs:[{type:"tuple",components:[
+      {name:"uid",type:"bytes32"},{name:"schema",type:"bytes32"},{name:"time",type:"uint64"},
+      {name:"expirationTime",type:"uint64"},{name:"revocationTime",type:"uint64"},{name:"refUID",type:"bytes32"},
+      {name:"recipient",type:"address"},{name:"attester",type:"address"},{name:"revocable",type:"bool"},{name:"data",type:"bytes"}]}]},
+  {type:"event",name:"Attested",inputs:[
+    {name:"recipient",type:"address",indexed:true},{name:"attester",type:"address",indexed:true},
+    {name:"uid",type:"bytes32",indexed:false},{name:"schemaUID",type:"bytes32",indexed:true}]}
+];
+
+const $ = id => document.getElementById(id);
+const log = (msg, err=false) => { $("log").textContent = msg; $("log").className = err ? "err" : ""; };
+const errText = e => String(e?.details || e?.shortMessage || e?.message || e);
+
+if (/MicroMessenger/i.test(navigator.userAgent)) $("wechat").style.display = "block";
+
+const params = new URLSearchParams(location.search);
+const REF = (params.get("ref") || DEFAULT_REF).trim();
+const PM = (params.get("pm") || PAYMASTER_URL).trim();
+$("refLink").href = EASSCAN + REF;
+$("refLink").textContent = REF;
+
+const client = createPublicClient({ chain: baseSepolia, transport: http() });
+let author = null, account = null, bundler = null, prepared = null, stage = "start";
+
+// 1. Load the author statement from chain and re-check its hash in the browser
+try {
+  const a = await client.readContract({ address: EAS, abi: EAS_ABI, functionName: "getAttestation", args: [REF] });
+  if (a.uid === "0x" + "0".repeat(64)) throw new Error("Record not found");
+  const [contentHash, summary] = decodeAbiParameters([{type:"bytes32"},{type:"string"},{type:"string"}], a.data);
+  author = a.attester;
+  $("summary").textContent = summary;
+  $("author").textContent = author;
+  $("hash").textContent = contentHash;
+  const ok = sha256(toBytes(summary)).toLowerCase() === contentHash.toLowerCase();
+  $("check").textContent = ok ? "Match · 一致" : "Mismatch · 不一致";
+  $("check").className = "pill " + (ok ? "ok" : "bad");
+  if (a.revocationTime > 0n) { $("check").textContent += " · revoked 已撤销"; $("check").className = "pill bad"; }
+  $("go").disabled = false;
+  $("go").textContent = "Step 1 · Create passkey · 创建 passkey";
+} catch (e) {
+  $("summary").textContent = "Could not load the record. 无法读取链上记录。";
+  $("check").textContent = "unavailable"; $("check").className = "pill bad";
+  log(errText(e), true);
+}
+
+function loadCred() { try { return JSON.parse(localStorage.getItem(CRED_KEY) || "null"); } catch (_) { return null; } }
+function saveCred(c) { try { localStorage.setItem(CRED_KEY, JSON.stringify(c)); } catch (_) {} }
+
+// Step 1: create (or reuse) a passkey, build the smart account, prepare the sponsored operation
+async function step1() {
+  let cred = loadCred();
+  if (!cred) {
+    log("Creating passkey… 正在创建 passkey…");
+    const c = await createWebAuthnCredential({ name: "TOKEN2049 Endorsement" });
+    cred = { id: c.id, publicKey: c.publicKey };
+    saveCred(cred);
+  }
+  const owner = toWebAuthnAccount({ credential: cred });
+  account = await toCoinbaseSmartAccount({ client, owners: [owner], version: "1.1" });
+  bundler = createBundlerClient({ account, client, transport: http(PM), paymaster: true });
+
+  const comment = $("comment").value.trim() || "Reviewed.";
+  const data = encodeFunctionData({ abi: EAS_ABI, functionName: "attest", args: [{
+    schema: ENDORSE_SCHEMA,
+    data: { recipient: author, expirationTime: 0n, revocable: true, refUID: REF,
+            data: encodeAbiParameters([{type:"bool"},{type:"string"}], [true, comment]), value: 0n }
+  }]});
+  log("Preparing sponsored transaction… 正在准备（手续费代付）…");
+  prepared = await bundler.prepareUserOperation({ calls: [{ to: EAS, data }] });
+  $("comment").disabled = true;
+  stage = "sign";
+  $("go").textContent = "Step 2 · Sign with Face ID · 签名";
+  log("Ready. Your wallet: " + account.address + "\n已就绪，请点按钮签名。");
+}
+
+// Step 2: sign with the passkey (directly in the tap) and submit
+async function step2() {
+  log("Waiting for Face ID / fingerprint… 等待刷脸或指纹…");
+  const signature = await account.signUserOperation(prepared);
+  log("Submitting… 正在提交…");
+  const sender = createBundlerClient({ client, transport: http(PM) });
+  const { account: _ignored, ...op } = prepared;
+  const hash = await sender.sendUserOperation({ ...op, signature, entryPointAddress: account.entryPoint.address });
+  log("Submitted. Waiting for the chain… 已提交，等待上链…");
+  const receipt = await sender.waitForUserOperationReceipt({ hash, timeout: 120000 });
+  if (!receipt.success) throw new Error("Operation reverted on chain. 链上执行失败。");
+  let uid = null;
+  for (const l of receipt.logs) {
+    if (l.address.toLowerCase() !== EAS.toLowerCase()) continue;
+    try { const ev = decodeEventLog({ abi: EAS_ABI, data: l.data, topics: l.topics }); if (ev.eventName === "Attested") uid = ev.args.uid; } catch (_) {}
+  }
+  stage = "done";
+  $("go").style.display = "none";
+  $("log").className = "";
+  $("log").innerHTML = uid
+    ? `Done ✅ 认证完成<br>Signer 签名人: <span class="mono">${account.address}</span><br><a href="${EASSCAN + uid}" target="_blank" rel="noopener">View your endorsement · 查看认证</a>`
+    : `Done ✅ <a href="https://sepolia.basescan.org/tx/${receipt.receipt.transactionHash}" target="_blank" rel="noopener">View transaction</a>`;
+}
+
+$("go").onclick = async () => {
+  $("go").disabled = true;
+  try {
+    if (!PM) throw new Error("No sponsor configured. 未配置代付地址。");
+    if (stage === "start") await step1();
+    else if (stage === "sign") await step2();
+  } catch (e) {
+    log("Error 出错: " + errText(e), true);
+    if (stage === "sign") { stage = "start"; prepared = null; $("comment").disabled = false; $("go").textContent = "Try again · 重试"; }
+  } finally {
+    if (stage !== "done") $("go").disabled = false;
+  }
+};
+</script>
+</body>
+</html>
